@@ -1523,9 +1523,23 @@ type Client struct {
 	// before the client's first use.
 	DERPMapCache DERPMapCache
 
-	lb       *locoBackend
-	ci       ConnInfo      // of server
-	meowWait chan struct{} // closed on first meowed message from server
+	// AutoRegion enables searching the DERP map for the server if it
+	// doesn't answer in the region its token names, as happens when a
+	// server run with "genkey --region=auto" restarts into a different
+	// region. See [DiscoverRegion]. If set, it must be set before the
+	// client's first use.
+	AutoRegion bool
+
+	// OnRegionDiscovered, if non-nil, is called when AutoRegion finds
+	// the server in a region other than the one its token named, with
+	// an updated token and the region it was found in. Publishing that
+	// token saves later clients the search.
+	OnRegionDiscovered func(ConnBlob, *tailcfg.DERPRegion)
+
+	lb         *locoBackend
+	ci         ConnInfo      // of server
+	meowWait   chan struct{} // closed on first meowed message from server
+	discovered ConnBlob      // set by AutoRegion if the server had moved; guarded by startMu
 
 	serverAddr netip.Addr
 
@@ -1570,7 +1584,7 @@ func (c *Client) initLocked() error {
 	if logf == nil {
 		logf = log.Printf
 	}
-	ci, err := ParseConnBlob(c.Server)
+	ci, err := ParseConnBlob(cmp.Or(c.discovered, c.Server))
 	if err != nil {
 		return err
 	}
@@ -1691,6 +1705,66 @@ type PingResult struct {
 	Latency time.Duration
 }
 
+// derpMapOpts returns the DERP map options implied by the client's
+// configuration, for [ConnInfo.Expand] and [DiscoverRegion].
+func (c *Client) derpMapOpts() []any {
+	var opts []any
+	if c.DERPMapURL != "" {
+		opts = append(opts, DERPMapURL(c.DERPMapURL))
+	}
+	if c.DERPMapCache != nil {
+		opts = append(opts, c.DERPMapCache)
+	}
+	return opts
+}
+
+// discoverRegionLocked looks for the server in the DERP map if it isn't
+// in the region its token names, recording the corrected token for
+// initLocked to use. It runs before initLocked so that the rest of the
+// client only ever sees a region the server answered in, and so that its
+// probes are all finished before magicsock connects: DERP delivers a node
+// key's traffic to whichever of its connections wrote last, so a probe
+// still open to the winning region would fight the real connection.
+// c.startMu must be held.
+func (c *Client) discoverRegionLocked(ctx context.Context, opts []any) error {
+	logf := c.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	blob, err := DiscoverRegion(ctx, c.Server, c.nodeKeyLocked(), append(slices.Clip(opts), logf)...)
+	if err != nil {
+		return err
+	}
+	c.discovered = blob
+	if blob == c.Server || c.OnRegionDiscovered == nil {
+		return nil
+	}
+	ci, err := ParseConnBlob(blob)
+	if err != nil {
+		return err
+	}
+	reg := &tailcfg.DERPRegion{RegionID: ci.RegionID}
+	if dm, err := FetchDERPMap(ctx, opts...); err == nil {
+		if r, ok := dm.Regions[ci.RegionID]; ok {
+			reg = r
+		}
+	}
+	c.OnRegionDiscovered(blob, reg)
+	return nil
+}
+
+// DiscoveredServer returns an updated token for the server if
+// [Client.AutoRegion] found it in a region other than the one its
+// original token named.
+func (c *Client) DiscoveredServer() (ConnBlob, bool) {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	if c.discovered == "" || c.discovered == c.Server {
+		return "", false
+	}
+	return c.discovered, true
+}
+
 // ensureStarted brings up the client's network stack on first use:
 // it resolves the server's DERP region if the ConnBlob didn't embed
 // it (possibly fetching the DERP map over the network, bounded by
@@ -1703,15 +1777,14 @@ func (c *Client) ensureStarted(ctx context.Context) error {
 	if c.started {
 		return nil
 	}
+	opts := c.derpMapOpts()
+	if c.AutoRegion && c.discovered == "" {
+		if err := c.discoverRegionLocked(ctx, opts); err != nil {
+			return err
+		}
+	}
 	if err := c.initLocked(); err != nil {
 		return err
-	}
-	var opts []any
-	if c.DERPMapURL != "" {
-		opts = append(opts, DERPMapURL(c.DERPMapURL))
-	}
-	if c.DERPMapCache != nil {
-		opts = append(opts, c.DERPMapCache)
 	}
 	if err := c.ci.Expand(ctx, opts...); err != nil {
 		return err
