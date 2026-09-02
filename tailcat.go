@@ -1748,7 +1748,7 @@ func (c *Client) up(ctx context.Context) error {
 // to add us as a WireGuard peer. Calling it is optional (Dial does
 // it implicitly) but useful to test connectivity or measure the
 // relay round-trip time. The internal timeout is 10 seconds
-// regardless of ctx.
+// regardless of ctx; the meow is re-sent every second until then.
 func (c *Client) Ping(ctx context.Context) (PingResult, error) {
 	var zero PingResult
 	if err := c.ensureStarted(ctx); err != nil {
@@ -1761,10 +1761,20 @@ func (c *Client) Ping(ctx context.Context) (PingResult, error) {
 	return res, err
 }
 
-// ping sends a single meow ping and waits for the meowed ack. The
+// pingTimeout bounds a single [Client.Ping], independent of its caller's
+// context.
+const pingTimeout = 10 * time.Second
+
+// meowRetryInterval is how often ping re-sends its meow while waiting
+// for the ack. A meow sent before the server's DERP connection is up is
+// simply dropped by the relay, and nothing retransmits it, so a single
+// send loses the race often enough to matter on a cold start.
+const meowRetryInterval = time.Second
+
+// ping sends meow pings until the server acks or ctx expires. The
 // client must be started.
 func (c *Client) ping(ctx context.Context) (PingResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
 
 	var zero PingResult
@@ -1775,19 +1785,24 @@ func (c *Client) ping(ctx context.Context) (PingResult, error) {
 	derpRegion := c.lb.derpRegionID()
 	pkt := EncodeMeowPing(c.lb.pub, mc.DiscoPublicKey())
 
-	sent, err := mc.SendDERPPacketTo(dstNode, derpRegion, pkt)
-	if err != nil {
-		return zero, fmt.Errorf("sending meow: %w", err)
-	}
-	if !sent {
-		return zero, fmt.Errorf("meow not sent")
-	}
+	t := time.NewTicker(meowRetryInterval)
+	defer t.Stop()
+	for {
+		sent, err := mc.SendDERPPacketTo(dstNode, derpRegion, pkt)
+		if err != nil {
+			return zero, fmt.Errorf("sending meow: %w", err)
+		}
+		if !sent {
+			return zero, fmt.Errorf("meow not sent")
+		}
 
-	select {
-	case <-c.meowWait:
-		return PingResult{time.Since(t0)}, nil
-	case <-ctx.Done():
-		return zero, ctx.Err()
+		select {
+		case <-c.meowWait:
+			return PingResult{time.Since(t0)}, nil
+		case <-t.C:
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
 	}
 }
 
