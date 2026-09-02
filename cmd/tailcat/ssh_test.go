@@ -26,13 +26,13 @@ func TestSSHProxyCommandDERPMap(t *testing.T) {
 		wantExe = `"` + exe + `"`
 	}
 
-	got := sshProxyCommand(exe, key, url, blob, port)
+	got := sshProxyCommand(exe, proxyOpts{keyName: key, derpMapURL: url}, blob, port)
 	want := wantExe + ` --key="client-default" --derpmap-url="https://derp.example.com/derpmap.json" tc-short-blob 22`
 	if got != want {
 		t.Errorf("sshProxyCommand with custom DERP map = %q; want %q", got, want)
 	}
 
-	got = sshProxyCommand(exe, key, tailcat.DefaultDERPMapURL, blob, port)
+	got = sshProxyCommand(exe, proxyOpts{keyName: key, derpMapURL: tailcat.DefaultDERPMapURL}, blob, port)
 	want = wantExe + ` --key="client-default" tc-short-blob 22`
 	if got != want {
 		t.Errorf("sshProxyCommand with default DERP map = %q; want %q", got, want)
@@ -41,10 +41,18 @@ func TestSSHProxyCommandDERPMap(t *testing.T) {
 	// No --key flag at all when unset. The shell would collapse
 	// --key="" to --key=, which ff parses by consuming the next
 	// argument, the address blob.
-	got = sshProxyCommand(exe, "", tailcat.DefaultDERPMapURL, blob, port)
+	got = sshProxyCommand(exe, proxyOpts{derpMapURL: tailcat.DefaultDERPMapURL}, blob, port)
 	want = wantExe + ` tc-short-blob 22`
 	if got != want {
 		t.Errorf("sshProxyCommand with no key = %q; want %q", got, want)
+	}
+
+	// --auto-region has to reach the child: it, not the ssh process,
+	// is what connects.
+	got = sshProxyCommand(exe, proxyOpts{derpMapURL: tailcat.DefaultDERPMapURL, autoRegion: true}, blob, port)
+	want = wantExe + ` --auto-region tc-short-blob 22`
+	if got != want {
+		t.Errorf("sshProxyCommand with auto-region = %q; want %q", got, want)
 	}
 }
 

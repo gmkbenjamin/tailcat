@@ -94,7 +94,7 @@ func clientSSHMode(portOrIPPort string, args []string) error {
 		"-o", "StrictHostKeyChecking no",
 		"-o", "UserKnownHostsFile " + os.DevNull,
 		"-o", "LogLevel ERROR",
-		"-o", "ProxyCommand=" + sshProxyCommand(exe, *flagKey, *flagDERPMapURL, connBlobStr, portOrIPPort),
+		"-o", "ProxyCommand=" + sshProxyCommand(exe, proxyFlags(), connBlobStr, portOrIPPort),
 		sshDst,
 	}
 	argv = append(argv, cmdArgs...)
@@ -103,10 +103,27 @@ func clientSSHMode(portOrIPPort string, args []string) error {
 	return nil
 }
 
+// proxyOpts are the global tailcat flags that a ProxyCommand has to
+// carry into the child process, which is the one that actually connects.
+type proxyOpts struct {
+	keyName    string
+	derpMapURL string
+	autoRegion bool
+}
+
+// proxyFlags returns the global flags as given on this invocation.
+func proxyFlags() proxyOpts {
+	return proxyOpts{
+		keyName:    *flagKey,
+		derpMapURL: *flagDERPMapURL,
+		autoRegion: *flagAutoRegion,
+	}
+}
+
 // sshProxyCommand returns the command passed to OpenSSH to connect the SSH
 // client to a tailcat server. The command is run by OpenSSH, so values that
 // can contain shell-special characters must be quoted.
-func sshProxyCommand(exe, keyName, derpMapURL, connBlob, portOrIPPort string) string {
+func sshProxyCommand(exe string, o proxyOpts, connBlob, portOrIPPort string) string {
 	if runtime.GOOS == "windows" {
 		// Plain quotes without Go's %q backslash escaping: the
 		// executable is a Windows path whose backslashes must survive
@@ -118,11 +135,14 @@ func sshProxyCommand(exe, keyName, derpMapURL, connBlob, portOrIPPort string) st
 	// No --key flag at all when unset: the shell turns --key="" into
 	// --key=, which ff parses by consuming the next argument (the
 	// address blob) as the flag's value.
-	if keyName != "" {
-		cmd += fmt.Sprintf(" --key=%q", keyName)
+	if o.keyName != "" {
+		cmd += fmt.Sprintf(" --key=%q", o.keyName)
 	}
-	if derpMapURL != tailcat.DefaultDERPMapURL {
-		cmd += fmt.Sprintf(" --derpmap-url=%q", derpMapURL)
+	if o.derpMapURL != tailcat.DefaultDERPMapURL {
+		cmd += fmt.Sprintf(" --derpmap-url=%q", o.derpMapURL)
+	}
+	if o.autoRegion {
+		cmd += " --auto-region"
 	}
 	return fmt.Sprintf("%s %s %s", cmd, connBlob, portOrIPPort)
 }

@@ -58,6 +58,7 @@ var (
 	flagFullAddress *bool
 	flagJSON        *bool
 	flagDERPMapURL  *string
+	flagAutoRegion  *bool
 )
 
 // The genkey subcommand's flags, likewise set by newRootCommand.
@@ -91,6 +92,7 @@ func newRootCommand() *ff.Command {
 	flagVerbose = rootFS.BoolLong("verbose", "be verbose")
 	flagJSON = rootFS.BoolLong("json", "in server mode, write {\"listenAddr\": ...} JSON to stdout")
 	flagDERPMapURL = rootFS.StringLong("derpmap-url", tailcat.DefaultDERPMapURL, "URL of the JSON DERP map used to resolve or auto-select a DERP region")
+	flagAutoRegion = rootFS.BoolLong("auto-region", "in client modes, if the server doesn't answer in the DERP region its address says, search the DERP map for the region it moved to and print its current address. Useful for a server whose key was made with 'genkey --region=auto', which re-picks a region at every startup")
 
 	serveFS := ff.NewFlagSet("serve").SetParent(rootFS)
 	flagAllow = serveFS.StringLong("allow", "", "comma-separated list of public keys to allow access to the server, or 'none' to allow no clients. If empty, all clients are allowed.")
@@ -101,7 +103,7 @@ func newRootCommand() *ff.Command {
 
 	pingFS := ff.NewFlagSet("ping").SetParent(rootFS)
 	pingUntilDirect := pingFS.BoolLong("until-direct", "keep pinging until a pong arrives over a direct (non-DERP) path; exit non-zero if that doesn't happen before --timeout")
-	pingTimeout := pingFS.DurationLong("timeout", 10*time.Second, "give up after this long")
+	pingTimeout := pingFS.DurationLong("timeout", 10*time.Second, "give up after this long (default 60s with --auto-region, which has a whole DERP map to search)")
 
 	socksFS := ff.NewFlagSet("socks").SetParent(rootFS)
 	socksListen := socksFS.StringLong("listen", "127.0.0.1:0", "SOCKS5 proxy listen [address]:port; a bare port means localhost, a bare address means an OS-assigned port")
@@ -152,7 +154,11 @@ func newRootCommand() *ff.Command {
 				LongHelp:  pingLongHelp,
 				Flags:     pingFS,
 				Exec: func(ctx context.Context, args []string) error {
-					return clientPingMode(getLogf(), *pingUntilDirect, *pingTimeout, args)
+					timeout := *pingTimeout
+					if f, ok := pingFS.GetFlag("timeout"); *flagAutoRegion && ok && !f.IsSet() {
+						timeout = autoRegionTimeout
+					}
+					return clientPingMode(getLogf(), *pingUntilDirect, timeout, args)
 				},
 			},
 			{
@@ -313,6 +319,7 @@ relay or a direct path. --until-direct keeps pinging (bounded by
 
 	tailcat ping <addrblob>
 	tailcat ping --until-direct <addrblob>
+	tailcat ping --auto-region <addrblob>
 
 Client mode, ssh:
 
@@ -674,8 +681,13 @@ func clientKey() key.NodePrivate {
 	return conf.Private
 }
 
+// autoRegionTimeout is the deadline the client modes give an operation
+// when --auto-region is set, in place of a shorter default: a search can
+// need a DERP map fetch and a probe of every region in it.
+const autoRegionTimeout = 60 * time.Second
+
 // newClient returns a [tailcat.Client] configured with the global
-// --derpmap-url flag and the disk DERP map cache.
+// --derpmap-url and --auto-region flags and the disk DERP map cache.
 func newClient(logf logger.Logf, blob tailcat.ConnBlob, priv key.NodePrivate) *tailcat.Client {
 	return &tailcat.Client{
 		Server:       blob,
@@ -683,6 +695,13 @@ func newClient(logf logger.Logf, blob tailcat.ConnBlob, priv key.NodePrivate) *t
 		Logf:         logf,
 		DERPMapURL:   *flagDERPMapURL,
 		DERPMapCache: derpMapCache{},
+		AutoRegion:   *flagAutoRegion,
+		// Stderr, not stdout: in client mode stdout is the connection
+		// itself, which ssh and scp use as a ProxyCommand.
+		OnRegionDiscovered: func(blob tailcat.ConnBlob, r *tailcfg.DERPRegion) {
+			fmt.Fprintf(os.Stderr, "# server moved to DERP region %v (%v); its current address is:\n#   %v\n",
+				r.RegionID, cmp.Or(r.RegionCode, r.RegionName), blob)
+		},
 	}
 }
 

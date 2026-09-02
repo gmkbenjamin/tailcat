@@ -95,7 +95,7 @@ func clientCPMode(recursive, preserve bool, portOrIPPort string, args []string) 
 		"-o", "StrictHostKeyChecking no",
 		"-o", "UserKnownHostsFile " + os.DevNull,
 		"-o", "LogLevel ERROR",
-		"-o", "ProxyCommand=" + sshProxyCommand(exe, *flagKey, *flagDERPMapURL, blob, portOrIPPort),
+		"-o", "ProxyCommand=" + sshProxyCommand(exe, proxyFlags(), blob, portOrIPPort),
 	}
 	if recursive {
 		argv = append(argv, "-r")
